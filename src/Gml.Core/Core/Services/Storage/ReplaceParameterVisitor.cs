@@ -4,8 +4,8 @@ namespace Gml.Core.Services.Storage;
 
 public class ReplaceParameterVisitor : ExpressionVisitor
 {
-    private readonly ParameterExpression _oldParameter;
     private readonly ParameterExpression _newParameter;
+    private readonly ParameterExpression _oldParameter;
 
     public ReplaceParameterVisitor(ParameterExpression oldParameter, ParameterExpression newParameter)
     {

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -25,7 +24,6 @@ using Gml.Core.Launcher;
 using Gml.Core.Services.Storage;
 using Gml.Models;
 using Gml.Models.System;
-using Gml.Web.Api.Domains.System;
 using GmlCore.Interfaces.Bootstrap;
 using GmlCore.Interfaces.Enums;
 using GmlCore.Interfaces.Launcher;
@@ -33,877 +31,847 @@ using GmlCore.Interfaces.Procedures;
 using GmlCore.Interfaces.System;
 using GmlCore.Interfaces.User;
 
-namespace Gml.Core.Helpers.Profiles
+namespace Gml.Core.Helpers.Profiles;
+
+public partial class ProfileProcedures : IProfileProcedures
 {
-    public partial class ProfileProcedures : IProfileProcedures
+    public delegate void ProgressPackChanged(ProgressChangedEventArgs e);
+
+    private const string AuthLibUrl =
+        "https://github.com/Gml-Launcher/Gml.Authlib.Injector/releases/download/authlib-injector-1.2.5-alpha-1/authlib-injector-1.2.5-alpha-1.jar";
+
+    private readonly GmlManager _gmlManager;
+
+    private readonly ILauncherInfo _launcherInfo;
+    private readonly INotificationProcedures _notifications;
+    private readonly IStorageService _storageService;
+    private readonly ConcurrentDictionary<string, IEnumerable<string>> _fabricVersions = new();
+    private readonly ConcurrentDictionary<string, string> _fileHashCache = new();
+    private readonly ConcurrentDictionary<string, IEnumerable<ForgeVersion>>? _forgeVersions = new();
+    private List<IGameProfile> _gameProfiles = new();
+    private IReadOnlyList<LiteLoaderVersion>? _liteLoaderVersions;
+    private readonly ConcurrentDictionary<string, IEnumerable<NeoForgeVersion>>? _neoForgeVersions = new();
+
+    private readonly ISubject<double> _packChanged = new Subject<double>();
+    private readonly ISubject<int> _profilesChanged = new Subject<int>();
+    private VersionMetadataCollection? _vanillaVersions;
+
+    public ProfileProcedures(
+        ILauncherInfo launcherInfo,
+        IStorageService storageService,
+        INotificationProcedures notifications,
+        GmlManager gmlManager)
     {
-        public delegate void ProgressPackChanged(ProgressChangedEventArgs e);
+        _launcherInfo = launcherInfo;
+        _storageService = storageService;
+        _gmlManager = gmlManager;
+        _notifications = notifications;
+    }
 
-        private ISubject<double> _packChanged = new Subject<double>();
-        private ISubject<int> _profilesChanged = new Subject<int>();
-        public IObservable<double> PackChanged => _packChanged;
-        public IObservable<int> ProfilesChanged => _profilesChanged;
+    public IObservable<double> PackChanged => _packChanged;
+    public IObservable<int> ProfilesChanged => _profilesChanged;
 
-        private const string AuthLibUrl =
-            "https://github.com/Gml-Launcher/Gml.Authlib.Injector/releases/download/authlib-injector-1.2.5-alpha-1/authlib-injector-1.2.5-alpha-1.jar";
+    public async Task AddProfile(IGameProfile? profile)
+    {
+        await RestoreProfiles();
 
-        private readonly ILauncherInfo _launcherInfo;
-        private readonly IStorageService _storageService;
-        private readonly GmlManager _gmlManager;
-        private readonly INotificationProcedures _notifications;
-        private List<IGameProfile> _gameProfiles = new();
-        private ConcurrentDictionary<string, string> _fileHashCache = new();
-        private VersionMetadataCollection? _vanillaVersions;
-        private ConcurrentDictionary<string, IEnumerable<string>> _fabricVersions = new();
-        private ConcurrentDictionary<string, IEnumerable<ForgeVersion>>? _forgeVersions = new();
-        private ConcurrentDictionary<string, IEnumerable<NeoForgeVersion>>? _neoForgeVersions = new();
-        private IReadOnlyList<LiteLoaderVersion>? _liteLoaderVersions;
+        if (profile is null)
+            throw new ArgumentNullException(nameof(profile));
 
-        public ProfileProcedures(
-            ILauncherInfo launcherInfo,
-            IStorageService storageService,
-            INotificationProcedures notifications,
-            GmlManager gmlManager)
+        if (_gameProfiles.Any(c => c.Name == profile.Name))
+            throw new ProfileExistException(profile);
+
+        profile.ProfileProcedures = this;
+        profile.ServerProcedures = this;
+        profile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, profile, _notifications,
+            _gmlManager.BugTracker);
+
+        _gameProfiles.Add(profile);
+
+        await SaveProfiles();
+    }
+
+    public async Task<IGameProfile?> AddProfile(string name,
+        string version,
+        string loaderVersion,
+        GameLoader loader,
+        string icon,
+        string description)
+    {
+        if (string.IsNullOrEmpty(name))
+            ThrowHelper.ThrowArgumentNullException<string>(name);
+
+        if (string.IsNullOrEmpty(version))
+            ThrowHelper.ThrowArgumentNullException<string>(version);
+
+        var profile = new GameProfile(name, version, loader)
         {
-            _launcherInfo = launcherInfo;
-            _storageService = storageService;
-            _gmlManager = gmlManager;
-            _notifications = notifications;
+            ProfileProcedures = this,
+            ServerProcedures = this,
+            IsEnabled = true,
+            CreateDate = DateTimeOffset.Now,
+            LaunchVersion = loaderVersion,
+            Description = description,
+            IconBase64 = icon
+        };
+
+        await AddProfile(profile);
+
+        return profile;
+    }
+
+    public async Task<bool> CanAddProfile(string name, string version, string loaderVersion, GameLoader dtoGameLoader)
+    {
+        if (_gameProfiles.Any(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        var versions = await GetAllowVersions(dtoGameLoader, version);
+
+        switch (dtoGameLoader)
+        {
+            case GameLoader.Undefined:
+                break;
+            case GameLoader.Vanilla:
+                return versions.Any(c => c.Equals(version));
+            case GameLoader.Forge:
+                return versions.Any(c => c.Equals(loaderVersion));
+            case GameLoader.Fabric:
+                return versions.Any(c => c.Equals(loaderVersion));
+            case GameLoader.LiteLoader:
+                return versions.Any(c => c.Equals(loaderVersion));
+            case GameLoader.NeoForge:
+                return versions.Any(c => c.Equals(loaderVersion));
+            default:
+                throw new ArgumentOutOfRangeException(nameof(dtoGameLoader), dtoGameLoader, null);
         }
 
-        public async Task AddProfile(IGameProfile? profile)
+        return true;
+    }
+
+    public Task RemoveProfile(IGameProfile profile)
+    {
+        return RemoveProfile(profile, false);
+    }
+
+    public async Task RemoveProfile(IGameProfile profile, bool removeProfileFiles)
+    {
+        await RestoreProfiles();
+
+        var localProfile = _gameProfiles.FirstOrDefault(c => c.Name == profile.Name);
+
+        if (localProfile == null)
+            return;
+
+        if (removeProfileFiles)
+            if (Directory.Exists(localProfile.ClientPath))
+                Directory.Delete(localProfile.ClientPath, true);
+
+        _gameProfiles.Remove(localProfile);
+
+        await SaveProfiles();
+    }
+
+    public async Task RestoreProfiles()
+    {
+        var profiles = await _storageService.GetAsync<List<GameProfile>>(StorageConstants.GameProfiles);
+
+        if (profiles != null && !_gameProfiles.Any())
         {
+            profiles = profiles.Where(c => c != null).ToList();
+
+            Parallel.ForEach(profiles, RestoreProfile);
+
+            _gameProfiles = [..profiles];
+        }
+    }
+
+    public Task RemoveProfile(int profileId)
+    {
+        var profile = _gameProfiles[profileId];
+
+        return RemoveProfile(profile, false);
+    }
+
+    public async Task ClearProfiles()
+    {
+        _gameProfiles = new List<IGameProfile>();
+
+        await SaveProfiles();
+    }
+
+    public async Task<bool> ValidateProfileAsync(IGameProfile baseProfile)
+    {
+        // ToDo: Сделать проверку верности профиля через схему
+
+        return true;
+    }
+
+    public bool ValidateProfile()
+    {
+        throw new NotImplementedException();
+    }
+
+    public async Task SaveProfiles()
+    {
+        await _storageService.SetAsync(StorageConstants.GameProfiles, _gameProfiles);
+
+        _profilesChanged.OnNext(0);
+    }
+
+    public async Task DownloadProfileAsync(IGameProfile baseProfile, IBootstrapProgram? version = default)
+    {
+        if (baseProfile is GameProfile gameProfile && await gameProfile.ValidateProfile())
+            gameProfile.LaunchVersion =
+                await gameProfile.GameLoader.DownloadGame(baseProfile.GameVersion, baseProfile.LaunchVersion,
+                    gameProfile.Loader, version);
+    }
+
+    public async Task<IGameProfile?> GetProfile(string profileName)
+    {
+        await RestoreProfiles();
+
+        var profile = _gameProfiles.FirstOrDefault(c => c.Name.Equals(profileName, StringComparison.OrdinalIgnoreCase));
+
+        return profile;
+    }
+
+    public async Task<IEnumerable<IGameProfile>> GetProfiles()
+    {
+        await RestoreProfiles();
+
+        return _gameProfiles.AsEnumerable();
+    }
+
+
+    public async Task<IEnumerable<IFileInfo>> GetProfileFiles(IGameProfile baseProfile)
+    {
+        var profileDirectoryInfo = new DirectoryInfo(baseProfile.ClientPath);
+
+        var localFiles = profileDirectoryInfo.GetFiles("*.*", SearchOption.AllDirectories);
+
+        var localFilesInfo = await Task.WhenAll(localFiles.AsParallel().Select(c =>
+        {
+            string hash;
+
+            if (_fileHashCache.TryGetValue(c.FullName, out var value))
+                hash = value;
+            else
+                using (var algorithm = new SHA256Managed())
+                {
+                    hash = SystemHelper.CalculateFileHash(c.FullName, algorithm);
+                    _fileHashCache[c.FullName] = hash;
+                }
+
+            return Task.FromResult(new LocalFileInfo
+            {
+                Name = c.Name,
+                Directory = c.FullName.Replace(_launcherInfo.InstallationDirectory, string.Empty),
+                Size = c.Length,
+                Hash = hash
+            });
+        }));
+
+        return localFilesInfo;
+    }
+
+    public async Task<IGameProfileInfo?> GetProfileInfo(
+        string profileName,
+        IStartupOptions startupOptions,
+        IUser user)
+    {
+        if (!_gameProfiles.Any())
             await RestoreProfiles();
 
-            if (profile is null)
-                throw new ArgumentNullException(nameof(profile));
+        var profile = _gameProfiles.FirstOrDefault(c => c.Name == profileName);
 
-            if (_gameProfiles.Any(c => c.Name == profile.Name))
-                throw new ProfileExistException(profile);
+        if (profile == null)
+            return null;
 
-            profile.ProfileProcedures = this;
-            profile.ServerProcedures = this;
-            profile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, profile, _notifications, _gmlManager.BugTracker);
+        _ = profile.CreateUserSessionAsync(user);
 
-            _gameProfiles.Add(profile);
+        var profileDirectory = Path.Combine(profile.ClientPath, "platforms", startupOptions.OsName,
+            startupOptions.OsArch);
+        var relativePath = Path.Combine("clients", profileName);
+        var jvmArgs = new List<string>();
+        var gameArguments = new List<string>();
 
-            await SaveProfiles();
+        if (profile.JvmArguments is not null)
+            jvmArgs.Add(profile.JvmArguments);
+
+        var files =
+            await profile.GetProfileFiles(startupOptions.OsName, startupOptions.OsArch);
+
+        if (files.Any(c => c.Name == Path.GetFileName(AuthLibUrl)))
+        {
+            var authLibRelativePath =
+                Path.Combine(profile.ClientPath, "libraries", "custom", Path.GetFileName(AuthLibUrl));
+            jvmArgs.Add($"-javaagent:{authLibRelativePath}={{authEndpoint}}");
         }
 
-        public async Task<IGameProfile?> AddProfile(string name,
-            string version,
-            string loaderVersion,
-            GameLoader loader,
-            string icon,
-            string description)
+        if (profile.GameArguments is not null)
+            gameArguments.AddRange(profile.GameArguments.Split(' '));
+
+        Process? process = default;
+
+        try
         {
-            if (string.IsNullOrEmpty(name))
-                ThrowHelper.ThrowArgumentNullException<string>(name);
+            process = await profile.GameLoader.CreateProcess(startupOptions, user, false,
+                jvmArgs.ToArray(), gameArguments.ToArray());
+        }
+        catch (Exception exception)
+        {
+            // ToDo: Sentry
+        }
 
-            if (string.IsNullOrEmpty(version))
-                ThrowHelper.ThrowArgumentNullException<string>(version);
+        var arguments =
+            process?.StartInfo.Arguments
+                .Replace(profileDirectory, Path.Combine("{localPath}", relativePath))
+                .Replace(_launcherInfo.InstallationDirectory, "{localPath}")
+            ?? string.Empty;
 
-            var profile = new GameProfile(name, version, loader)
+        var javaPath = process?.StartInfo.FileName.Replace(_launcherInfo.InstallationDirectory, "{localPath}") ??
+                       "java";
+
+        if (process != null)
+            return new GameProfileInfo
             {
-                ProfileProcedures = this,
-                ServerProcedures = this,
-                IsEnabled = true,
-                CreateDate = DateTimeOffset.Now,
-                LaunchVersion = loaderVersion,
-                Description = description,
-                IconBase64 = icon
+                ProfileName = profile.Name,
+                Description = profile.Description,
+                IconBase64 = profile.IconBase64,
+                JvmArguments = profile.JvmArguments ?? string.Empty,
+                GameArguments = profile.GameArguments ?? string.Empty,
+                HasUpdate = profile.State != ProfileState.Loading,
+                Arguments = arguments,
+                JavaPath = javaPath,
+                State = profile.State,
+                ClientVersion = profile.GameVersion,
+                MinecraftVersion = profile.GameVersion,
+                LaunchVersion = profile.LaunchVersion ?? string.Empty,
+                Files = files.OfType<LocalFileInfo>(),
+                WhiteListFolders = profile.FolderWhiteList?.OfType<LocalFolderInfo>().ToList() ?? [],
+                WhiteListFiles = profile.FileWhiteList?.OfType<LocalFileInfo>().ToList() ?? []
             };
 
-            await AddProfile(profile);
-
-            return profile;
-        }
-
-        public async Task<bool> CanAddProfile(string name, string version, string loaderVersion, GameLoader dtoGameLoader)
+        return new GameProfileInfo
         {
-            if (_gameProfiles.Any(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)))
-                return false;
+            ProfileName = profile.Name,
+            Arguments = string.Empty,
+            JavaPath = string.Empty,
+            State = profile.State,
+            Files = files.OfType<LocalFileInfo>(),
+            IconBase64 = profile.IconBase64,
+            Description = profile.Description,
+            ClientVersion = profile.GameVersion,
+            JvmArguments = profile.JvmArguments ?? string.Empty,
+            GameArguments = profile.GameArguments ?? string.Empty,
+            LaunchVersion = profile.LaunchVersion ?? string.Empty,
+            WhiteListFolders = profile.FolderWhiteList?.OfType<LocalFolderInfo>().ToList() ?? [],
+            WhiteListFiles = profile.FileWhiteList?.OfType<LocalFileInfo>().ToList() ?? [],
+            HasUpdate = profile.State != ProfileState.Loading,
+            MinecraftVersion = profile.GameVersion
+        };
+    }
 
-            var versions = await GetAllowVersions(dtoGameLoader, version);
+    public async Task<IGameProfileInfo?> RestoreProfileInfo(
+        string profileName)
+    {
+        await RestoreProfiles();
 
-            switch (dtoGameLoader)
-            {
-                case GameLoader.Undefined:
-                    break;
-                case GameLoader.Vanilla:
-                    return versions.Any(c => c.Equals(version));
-                case GameLoader.Forge:
-                    return versions.Any(c => c.Equals(loaderVersion));
-                case GameLoader.Fabric:
-                    return versions.Any(c => c.Equals(loaderVersion));
-                case GameLoader.LiteLoader:
-                    return versions.Any(c => c.Equals(loaderVersion));
-                case GameLoader.NeoForge:
-                    return versions.Any(c => c.Equals(loaderVersion));
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(dtoGameLoader), dtoGameLoader, null);
-            }
+        var profile = _gameProfiles.FirstOrDefault(c => c.Name == profileName);
 
-            return true;
-        }
+        if (profile == null)
+            return null;
 
-        public Task RemoveProfile(IGameProfile profile)
+        try
         {
-            return RemoveProfile(profile, false);
-        }
+            await profile.DownloadAsync();
+            var authLibArguments = await profile.InstallAuthLib();
+            await profile.CreateModsFolder();
+            var process =
+                await profile.GameLoader.CreateProcess(StartupOptions.Empty, Core.User.User.Empty, true,
+                    authLibArguments, []);
 
-        public async Task RemoveProfile(IGameProfile profile, bool removeProfileFiles)
-        {
-            await RestoreProfiles();
-
-            var localProfile = _gameProfiles.FirstOrDefault(c => c.Name == profile.Name);
-
-            if (localProfile == null)
-                return;
-
-            if (removeProfileFiles)
-            {
-                if (Directory.Exists(localProfile.ClientPath))
-                    Directory.Delete(localProfile.ClientPath, true);
-            }
-
-            _gameProfiles.Remove(localProfile);
+            var files = (await GetProfileFiles(profile)).ToList();
+            var files2 = GetWhiteListFilesProfileFiles(files);
 
             await SaveProfiles();
-        }
-
-        public async Task RestoreProfiles()
-        {
-            var profiles = await _storageService.GetAsync<List<GameProfile>>(StorageConstants.GameProfiles);
-
-            if (profiles != null && !_gameProfiles.Any())
-            {
-                profiles = profiles.Where(c => c != null).ToList();
-
-                Parallel.ForEach(profiles, RestoreProfile);
-
-                _gameProfiles = [..profiles];
-            }
-        }
-
-        private async void RestoreProfile(GameProfile profile)
-        {
-            await UpdateProfilesService(profile);
-        }
-
-        public Task RemoveProfile(int profileId)
-        {
-            var profile = _gameProfiles[profileId];
-
-            return RemoveProfile(profile, false);
-        }
-
-        public async Task ClearProfiles()
-        {
-            _gameProfiles = new List<IGameProfile>();
-
-            await SaveProfiles();
-        }
-
-        public async Task<bool> ValidateProfileAsync(IGameProfile baseProfile)
-        {
-            // ToDo: Сделать проверку верности профиля через схему
-
-            return true;
-        }
-
-        public bool ValidateProfile()
-        {
-            throw new NotImplementedException();
-        }
-
-        public async Task SaveProfiles()
-        {
-            await _storageService.SetAsync(StorageConstants.GameProfiles, _gameProfiles);
-
-            _profilesChanged.OnNext(0);
-        }
-
-        public async Task DownloadProfileAsync(IGameProfile baseProfile, IBootstrapProgram? version = default)
-        {
-            if (baseProfile is GameProfile gameProfile && await gameProfile.ValidateProfile())
-                gameProfile.LaunchVersion =
-                    await gameProfile.GameLoader.DownloadGame(baseProfile.GameVersion, baseProfile.LaunchVersion, gameProfile.Loader, version);
-        }
-
-        public async Task<IGameProfile?> GetProfile(string profileName)
-        {
-            await RestoreProfiles();
-
-            var profile = _gameProfiles.FirstOrDefault(c => c.Name.Equals(profileName, StringComparison.OrdinalIgnoreCase));
-
-            return profile;
-        }
-
-        public async Task<IEnumerable<IGameProfile>> GetProfiles()
-        {
-            await RestoreProfiles();
-
-            return _gameProfiles.AsEnumerable();
-        }
-
-
-        public async Task<IEnumerable<IFileInfo>> GetProfileFiles(IGameProfile baseProfile)
-        {
-            var profileDirectoryInfo = new DirectoryInfo(baseProfile.ClientPath);
-
-            var localFiles = profileDirectoryInfo.GetFiles("*.*", SearchOption.AllDirectories);
-
-            var localFilesInfo = await Task.WhenAll(localFiles.AsParallel().Select(c =>
-            {
-                string hash;
-
-                if (_fileHashCache.TryGetValue(c.FullName, out var value))
-                {
-                    hash = value;
-                }
-                else
-                {
-                    using (var algorithm = new SHA256Managed())
-                    {
-                        hash = SystemHelper.CalculateFileHash(c.FullName, algorithm);
-                        _fileHashCache[c.FullName] = hash;
-                    }
-                }
-
-                return Task.FromResult(new LocalFileInfo
-                {
-                    Name = c.Name,
-                    Directory = c.FullName.Replace(_launcherInfo.InstallationDirectory, string.Empty),
-                    Size = c.Length,
-                    Hash = hash
-                });
-            }));
-
-            return localFilesInfo;
-        }
-
-        public async Task<IGameProfileInfo?> GetProfileInfo(
-            string profileName,
-            IStartupOptions startupOptions,
-            IUser user)
-        {
-            if (!_gameProfiles.Any())
-                await RestoreProfiles();
-
-            var profile = _gameProfiles.FirstOrDefault(c => c.Name == profileName);
-
-            if (profile == null)
-                return null;
-
-            _ = profile.CreateUserSessionAsync(user);
-
-            var profileDirectory = Path.Combine(profile.ClientPath, "platforms", startupOptions.OsName,
-                startupOptions.OsArch);
-            var relativePath = Path.Combine("clients", profileName);
-            var jvmArgs = new List<string>();
-            var gameArguments = new List<string>();
-
-            if (profile.JvmArguments is not null)
-                jvmArgs.Add(profile.JvmArguments);
-
-            var files =
-                await profile.GetProfileFiles(startupOptions.OsName, startupOptions.OsArch);
-
-            if (files.Any(c => c.Name == Path.GetFileName(AuthLibUrl)))
-            {
-                var authLibRelativePath = Path.Combine(profile.ClientPath, "libraries", "custom", Path.GetFileName(AuthLibUrl));
-                jvmArgs.Add($"-javaagent:{authLibRelativePath}={{authEndpoint}}");
-            }
-
-            if (profile.GameArguments is not null)
-                gameArguments.AddRange(profile.GameArguments.Split(' '));
-
-            Process? process = default;
-
-            try
-            {
-                process = await profile.GameLoader.CreateProcess(startupOptions, user, false,
-                    jvmArgs.ToArray(), gameArguments.ToArray());
-            }
-            catch (Exception exception)
-            {
-                // ToDo: Sentry
-            }
-            var arguments =
-                process?.StartInfo.Arguments
-                    .Replace(profileDirectory, Path.Combine("{localPath}", relativePath))
-                    .Replace(_launcherInfo.InstallationDirectory, "{localPath}")
-                ?? string.Empty;
-
-            var javaPath = process?.StartInfo.FileName.Replace(_launcherInfo.InstallationDirectory, "{localPath}") ??
-                           "java";
-
-            if (process != null)
-            {
-                return new GameProfileInfo
-                {
-                    ProfileName = profile.Name,
-                    Description = profile.Description,
-                    IconBase64 = profile.IconBase64,
-                    JvmArguments = profile.JvmArguments ?? string.Empty,
-                    GameArguments = profile.GameArguments ?? string.Empty,
-                    HasUpdate = profile.State != ProfileState.Loading,
-                    Arguments = arguments,
-                    JavaPath = javaPath,
-                    State = profile.State,
-                    ClientVersion = profile.GameVersion,
-                    MinecraftVersion = profile.GameVersion,
-                    LaunchVersion = profile.LaunchVersion ?? string.Empty,
-                    Files = files.OfType<LocalFileInfo>(),
-                    WhiteListFolders = profile.FolderWhiteList?.OfType<LocalFolderInfo>().ToList() ?? [],
-                    WhiteListFiles = profile.FileWhiteList?.OfType<LocalFileInfo>().ToList() ?? []
-                };
-            }
 
             return new GameProfileInfo
             {
                 ProfileName = profile.Name,
-                Arguments = string.Empty,
-                JavaPath = string.Empty,
-                State = profile.State,
-                Files = files.OfType<LocalFileInfo>(),
-                IconBase64 = profile.IconBase64,
-                Description = profile.Description,
+                Arguments = process.StartInfo.Arguments.Replace(profile.ClientPath, "{localPath}"),
                 ClientVersion = profile.GameVersion,
-                JvmArguments = profile.JvmArguments ?? string.Empty,
-                GameArguments = profile.GameArguments ?? string.Empty,
-                LaunchVersion = profile.LaunchVersion ?? string.Empty,
-                WhiteListFolders = profile.FolderWhiteList?.OfType<LocalFolderInfo>().ToList() ?? [],
-                WhiteListFiles = profile.FileWhiteList?.OfType<LocalFileInfo>().ToList() ?? [],
                 HasUpdate = profile.State != ProfileState.Loading,
-                MinecraftVersion = profile.GameVersion
+                MinecraftVersion = profile.LaunchVersion.Split('-').First(),
+                Files = files.OfType<LocalFileInfo>(),
+                WhiteListFiles = files2.OfType<LocalFileInfo>()
             };
         }
-
-        public async Task<IGameProfileInfo?> RestoreProfileInfo(
-            string profileName)
+        catch (Exception exception)
         {
-            await RestoreProfiles();
+            throw new Exception($"Не удалось восстановить игровой профиль. {exception}");
+        }
+        finally
+        {
+            profile.State = ProfileState.Ready;
+        }
+    }
 
-            var profile = _gameProfiles.FirstOrDefault(c => c.Name == profileName);
+    public async Task PackProfile(IGameProfile profile)
+    {
+        var fileInfos = await profile.GetAllProfileFiles(true);
+        var totalFiles = fileInfos.Length;
+        var processed = 0;
 
-            if (profile == null)
-                return null;
-
+        foreach (var file in fileInfos)
+        {
+            var percentage = processed * 100 / totalFiles;
             try
             {
-                await profile.DownloadAsync();
-                var authLibArguments = await profile.InstallAuthLib();
-                await profile.CreateModsFolder();
-                var process =
-                    await profile.GameLoader.CreateProcess(StartupOptions.Empty, Core.User.User.Empty, true, authLibArguments, []);
+                var filePath = NormalizePath(_launcherInfo.InstallationDirectory, file.Directory);
 
-                var files = (await GetProfileFiles(profile)).ToList();
-                var files2 = GetWhiteListFilesProfileFiles(files);
-
-                await SaveProfiles();
-
-                return new GameProfileInfo
+                switch (_launcherInfo.StorageSettings.StorageType)
                 {
-                    ProfileName = profile.Name,
-                    Arguments = process.StartInfo.Arguments.Replace(profile.ClientPath, "{localPath}"),
-                    ClientVersion = profile.GameVersion,
-                    HasUpdate = profile.State != ProfileState.Loading,
-                    MinecraftVersion = profile.LaunchVersion.Split('-').First(),
-                    Files = files.OfType<LocalFileInfo>(),
-                    WhiteListFiles = files2.OfType<LocalFileInfo>()
-                };
+                    case StorageType.LocalStorage:
+                        file.FullPath = filePath;
+                        if (await _storageService.GetAsync<LocalFileInfo>(file.Hash) is not { } localFile ||
+                            !File.Exists(localFile.FullPath)) await _storageService.SetAsync(file.Hash, file);
+
+                        _packChanged.OnNext(percentage);
+
+                        break;
+                    case StorageType.S3:
+                        var tags = new Dictionary<string, string>
+                        {
+                            { "hash", file.Hash },
+                            { "file-name", file.Name }
+                        };
+                        if (await _gmlManager.Files.CheckFileExists("profiles", file.Hash) == false)
+                            await _gmlManager.Files.LoadFile(File.OpenRead(filePath), "profiles", file.Hash, tags);
+
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException();
+                }
             }
             catch (Exception exception)
             {
-                throw new Exception($"Не удалось восстановить игровой профиль. {exception}");
+                Console.WriteLine(exception);
+                throw;
             }
             finally
             {
-                profile.State = ProfileState.Ready;
-            }
-        }
-
-        public async Task PackProfile(IGameProfile profile)
-        {
-            var fileInfos = await profile.GetAllProfileFiles(true);
-            var totalFiles = fileInfos.Length;
-            var processed = 0;
-
-            foreach (var file in fileInfos)
-            {
-                var percentage = processed * 100 / totalFiles;
-                try
-                {
-                    var filePath = NormalizePath(_launcherInfo.InstallationDirectory, file.Directory);
-
-                    switch (_launcherInfo.StorageSettings.StorageType)
-                    {
-                        case StorageType.LocalStorage:
-                            file.FullPath = filePath;
-                            if (await _storageService.GetAsync<LocalFileInfo>(file.Hash) is not {} localFile || !File.Exists(localFile.FullPath))
-                            {
-                                await _storageService.SetAsync(file.Hash, file);
-                            }
-
-                            _packChanged.OnNext(percentage);
-
-                            break;
-                        case StorageType.S3:
-                            var tags = new Dictionary<string, string>
-                            {
-                                { "hash", file.Hash },
-                                { "file-name", file.Name }
-                            };
-                            if (await _gmlManager.Files.CheckFileExists("profiles", file.Hash) == false)
-                            {
-                                await _gmlManager.Files.LoadFile(File.OpenRead(filePath), "profiles", file.Hash, tags);
-                            }
-
-                            break;
-                        default:
-                            throw new ArgumentOutOfRangeException();
-                    }
-                }
-                catch (Exception exception)
-                {
-                    Console.WriteLine(exception);
-                    throw;
-                }
-                finally
-                {
-                    _packChanged.OnNext(percentage);
-                }
-
-                processed++;
-            }
-        }
-
-        private string NormalizePath(string directory, string fileDirectory)
-        {
-            directory = directory
-                .Replace('\\', Path.DirectorySeparatorChar)
-                .Replace('/', Path.DirectorySeparatorChar);
-            // .TrimStart(Path.DirectorySeparatorChar);
-
-            fileDirectory = fileDirectory
-                .Replace('\\', Path.DirectorySeparatorChar)
-                .Replace('/', Path.DirectorySeparatorChar)
-                .TrimStart(Path.DirectorySeparatorChar);
-
-            return Path.Combine(directory, fileDirectory);
-        }
-
-        public Task AddFileToWhiteList(IGameProfile profile, IFileInfo file)
-        {
-            AddWhiteListFileIfNotExists(profile, file);
-
-            return SaveProfiles();
-        }
-
-        private static void AddWhiteListFileIfNotExists(IGameProfile profile, IFileInfo file)
-        {
-            profile.FileWhiteList ??= [];
-
-            if (!profile.FileWhiteList.Any(c => c.Hash == file.Hash))
-            {
-                profile.FileWhiteList.Add(file);
-            }
-        }
-
-        public Task RemoveFileFromWhiteList(IGameProfile profile, IFileInfo file)
-        {
-            profile.FileWhiteList ??= [];
-
-            if (profile.FileWhiteList.FirstOrDefault(c => c.Hash == file.Hash) is not { } fileInfo)
-                return Task.CompletedTask;
-
-            profile.FileWhiteList.Remove(fileInfo);
-
-            return SaveProfiles();
-
-        }
-
-        public async Task UpdateProfile(IGameProfile profile,
-            string newProfileName,
-            Stream? icon,
-            Stream? backgroundImage,
-            string updateDtoDescription,
-            bool isEnabled,
-            string jvmArguments,
-            string gameArguments)
-        {
-            var directory =
-                new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "clients", profile.Name));
-            var newDirectory =
-                new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "clients", newProfileName));
-
-            var needRenameFolder = profile.Name != newProfileName;
-
-            if (newDirectory.Exists && profile.Name != newProfileName)
-                return;
-
-            var iconBase64 = icon is null
-                ? profile.IconBase64
-                : await ConvertStreamToBase64Async(icon);
-
-            var backgroundKey = backgroundImage is null
-                ? profile.BackgroundImageKey
-                : await _gmlManager.Files.LoadFile(backgroundImage, "profile-backgrounds");
-
-            await UpdateProfile(profile, newProfileName, iconBase64, backgroundKey, updateDtoDescription,
-                needRenameFolder, directory, newDirectory, isEnabled, jvmArguments, gameArguments);
-        }
-
-        private async Task<string> ConvertStreamToBase64Async(Stream stream)
-        {
-            using (var memoryStream = new MemoryStream())
-            {
-                await stream.CopyToAsync(memoryStream);
-                var fileBytes = memoryStream.ToArray();
-                return Convert.ToBase64String(fileBytes);
-            }
-        }
-
-        private async Task UpdateProfile(IGameProfile profile, string newProfileName, string newIcon,
-            string backgroundImageKey,
-            string newDescription, bool needRenameFolder, DirectoryInfo directory, DirectoryInfo newDirectory,
-            bool isEnabled,
-            string jvmArguments,
-            string gameArguments)
-        {
-            profile.Name = newProfileName;
-            profile.IconBase64 = newIcon;
-            profile.BackgroundImageKey = backgroundImageKey;
-            profile.Description = newDescription;
-            profile.IsEnabled = isEnabled;
-            profile.JvmArguments = jvmArguments;
-            profile.GameArguments = gameArguments;
-
-            profile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, profile, _notifications, _gmlManager.BugTracker);
-
-            await SaveProfiles();
-            await RestoreProfiles();
-
-            if (needRenameFolder) RenameFolder(directory.FullName, newDirectory.FullName);
-        }
-
-        public async Task<string[]> InstallAuthLib(IGameProfile profile)
-        {
-            var directory =
-                new DirectoryInfo(profile.ClientPath);
-
-            var authLibPath = new DirectoryInfo(Path.Combine(directory.FullName, "libraries", "custom"));
-            var downloadingUrl = new FileInfo(AuthLibUrl);
-            var downloadingFileInfo = new FileInfo(Path.Combine(authLibPath.FullName, downloadingUrl.Name));
-            var authlibFileName = Path.GetFileName(downloadingUrl.FullName);
-
-            if (!authLibPath.Exists)
-                authLibPath.Create();
-
-            if (downloadingFileInfo.Exists && downloadingFileInfo.Length > 0)
-                return [$"-javaagent:{{localPath}}\\libraries\\custom\\{authlibFileName}={{authEndpoint}}"];
-
-            using (var httpClient = new HttpClient())
-            {
-                var response = await httpClient.GetAsync(AuthLibUrl);
-
-                using (var contentStream = await response.Content.ReadAsStreamAsync())
-                using (Stream fileStream = new FileStream(downloadingFileInfo.FullName, FileMode.Create,
-                           FileAccess.Write, FileShare.None, 8192, true))
-                {
-                    await contentStream.CopyToAsync(fileStream);
-                }
+                _packChanged.OnNext(percentage);
             }
 
-            downloadingFileInfo.Refresh();
+            processed++;
+        }
+    }
 
+    public Task AddFileToWhiteList(IGameProfile profile, IFileInfo file)
+    {
+        AddWhiteListFileIfNotExists(profile, file);
+
+        return SaveProfiles();
+    }
+
+    public Task RemoveFileFromWhiteList(IGameProfile profile, IFileInfo file)
+    {
+        profile.FileWhiteList ??= [];
+
+        if (profile.FileWhiteList.FirstOrDefault(c => c.Hash == file.Hash) is not { } fileInfo)
+            return Task.CompletedTask;
+
+        profile.FileWhiteList.Remove(fileInfo);
+
+        return SaveProfiles();
+    }
+
+    public async Task UpdateProfile(IGameProfile profile,
+        string newProfileName,
+        Stream? icon,
+        Stream? backgroundImage,
+        string updateDtoDescription,
+        bool isEnabled,
+        string jvmArguments,
+        string gameArguments)
+    {
+        var directory =
+            new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "clients", profile.Name));
+        var newDirectory =
+            new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "clients", newProfileName));
+
+        var needRenameFolder = profile.Name != newProfileName;
+
+        if (newDirectory.Exists && profile.Name != newProfileName)
+            return;
+
+        var iconBase64 = icon is null
+            ? profile.IconBase64
+            : await ConvertStreamToBase64Async(icon);
+
+        var backgroundKey = backgroundImage is null
+            ? profile.BackgroundImageKey
+            : await _gmlManager.Files.LoadFile(backgroundImage, "profile-backgrounds");
+
+        await UpdateProfile(profile, newProfileName, iconBase64, backgroundKey, updateDtoDescription,
+            needRenameFolder, directory, newDirectory, isEnabled, jvmArguments, gameArguments);
+    }
+
+    public async Task<string[]> InstallAuthLib(IGameProfile profile)
+    {
+        var directory =
+            new DirectoryInfo(profile.ClientPath);
+
+        var authLibPath = new DirectoryInfo(Path.Combine(directory.FullName, "libraries", "custom"));
+        var downloadingUrl = new FileInfo(AuthLibUrl);
+        var downloadingFileInfo = new FileInfo(Path.Combine(authLibPath.FullName, downloadingUrl.Name));
+        var authlibFileName = Path.GetFileName(downloadingUrl.FullName);
+
+        if (!authLibPath.Exists)
+            authLibPath.Create();
+
+        if (downloadingFileInfo.Exists && downloadingFileInfo.Length > 0)
             return [$"-javaagent:{{localPath}}\\libraries\\custom\\{authlibFileName}={{authEndpoint}}"];
-        }
 
-        public async Task<IGameProfileInfo?> GetCacheProfile(IGameProfile baseProfile)
+        using (var httpClient = new HttpClient())
         {
-            return await _storageService.GetAsync<GameProfileInfo>($"CachedProfile-{baseProfile.Name}");
-        }
+            var response = await httpClient.GetAsync(AuthLibUrl);
 
-        public Task SetCacheProfile(IGameProfileInfo profile)
-        {
-            return _storageService.SetAsync($"CachedProfile-{profile.ProfileName}", (GameProfileInfo)profile);
-        }
-
-        public Task CreateModsFolder(IGameProfile profile)
-        {
-            var modsDirectory = Path.Combine(profile.ClientPath, "mods");
-
-            if (!Directory.Exists(modsDirectory))
+            using (var contentStream = await response.Content.ReadAsStreamAsync())
+            using (Stream fileStream = new FileStream(downloadingFileInfo.FullName, FileMode.Create,
+                       FileAccess.Write, FileShare.None, 8192, true))
             {
-                Directory.CreateDirectory(modsDirectory);
+                await contentStream.CopyToAsync(fileStream);
             }
-
-            return Task.CompletedTask;
         }
 
-        public Task<ICollection<IFileInfo>> GetProfileFiles(
-            IGameProfile profile,
-            string osName,
-            string osArchitecture)
-        {
-            return profile.GameLoader.GetLauncherFiles(osName, osArchitecture);
-        }
+        downloadingFileInfo.Refresh();
 
-        public Task<IFileInfo[]> GetAllProfileFiles(IGameProfile baseProfile, bool needRestoreCache = false)
-        {
-            return baseProfile.GameLoader.GetAllFiles(needRestoreCache);
-        }
+        return [$"-javaagent:{{localPath}}\\libraries\\custom\\{authlibFileName}={{authEndpoint}}"];
+    }
 
-        public async Task<IEnumerable<string>> GetAllowVersions(GameLoader gameLoader, string? minecraftVersion)
+    public async Task<IGameProfileInfo?> GetCacheProfile(IGameProfile baseProfile)
+    {
+        return await _storageService.GetAsync<GameProfileInfo>($"CachedProfile-{baseProfile.Name}");
+    }
+
+    public Task SetCacheProfile(IGameProfileInfo profile)
+    {
+        return _storageService.SetAsync($"CachedProfile-{profile.ProfileName}", (GameProfileInfo)profile);
+    }
+
+    public Task CreateModsFolder(IGameProfile profile)
+    {
+        var modsDirectory = Path.Combine(profile.ClientPath, "mods");
+
+        if (!Directory.Exists(modsDirectory)) Directory.CreateDirectory(modsDirectory);
+
+        return Task.CompletedTask;
+    }
+
+    public Task<ICollection<IFileInfo>> GetProfileFiles(
+        IGameProfile profile,
+        string osName,
+        string osArchitecture)
+    {
+        return profile.GameLoader.GetLauncherFiles(osName, osArchitecture);
+    }
+
+    public Task<IFileInfo[]> GetAllProfileFiles(IGameProfile baseProfile, bool needRestoreCache = false)
+    {
+        return baseProfile.GameLoader.GetAllFiles(needRestoreCache);
+    }
+
+    public async Task<IEnumerable<string>> GetAllowVersions(GameLoader gameLoader, string? minecraftVersion)
+    {
+        try
         {
-            try
+            var anyLauncher = new MinecraftLauncher();
+
+            switch (gameLoader)
             {
-                var anyLauncher = new MinecraftLauncher();
+                case GameLoader.Undefined:
+                    break;
+                case GameLoader.Vanilla:
 
-                switch (gameLoader)
-                {
-                    case GameLoader.Undefined:
-                        break;
-                    case GameLoader.Vanilla:
+                    _vanillaVersions ??= await anyLauncher.GetAllVersionsAsync();
+                    return _vanillaVersions.Where(c => c.Type == "release").Select(c => c.Name);
 
-                        _vanillaVersions ??= await anyLauncher.GetAllVersionsAsync();
-                        return _vanillaVersions.Where(c => c.Type == "release").Select(c => c.Name);
+                case GameLoader.Forge:
 
-                    case GameLoader.Forge:
+                    var forge = new ForgeInstaller(anyLauncher);
+                    var versionMapper = new ForgeInstallerVersionMapper();
 
-                        var forge = new ForgeInstaller(anyLauncher);
-                        var versionMapper = new ForgeInstallerVersionMapper();
+                    if (!_forgeVersions.Any(c => c.Key == minecraftVersion))
+                        _forgeVersions[minecraftVersion] = await forge.GetForgeVersions(minecraftVersion);
 
-                        if (!_forgeVersions.Any(c => c.Key == minecraftVersion))
-                        {
-                            _forgeVersions[minecraftVersion] = await forge.GetForgeVersions(minecraftVersion);
-                        }
+                    return _forgeVersions[minecraftVersion]
+                        .OrderByDescending(c => c.IsRecommendedVersion)
+                        .ThenByDescending(c => c.Time)
+                        .Select(c => versionMapper.CreateInstaller(c).ForgeVersion.ForgeVersionName);
 
-                        return _forgeVersions[minecraftVersion]
-                            .OrderByDescending(c => c.IsRecommendedVersion)
-                            .ThenByDescending(c => c.Time)
-                            .Select(c => versionMapper.CreateInstaller(c).ForgeVersion.ForgeVersionName);
+                case GameLoader.Fabric:
 
-                    case GameLoader.Fabric:
+                    var fabricLoader = new FabricInstaller(new HttpClient());
 
-                        var fabricLoader = new FabricInstaller(new HttpClient());
+                    var loaders = await fabricLoader.GetLoaders(minecraftVersion);
 
-                        var loaders = await fabricLoader.GetLoaders(minecraftVersion);
+                    var versions = loaders
+                        .Where(c => !string.IsNullOrEmpty(c.Version))
+                        .OrderBy(c => c.Stable)
+                        .Select(c => c.Version!)
+                        .ToList()
+                        .AsReadOnly();
 
-                        var versions = loaders
-                            .Where(c => !string.IsNullOrEmpty(c.Version))
-                            .OrderBy(c => c.Stable)
-                            .Select(c => c.Version!)
-                            .ToList()
-                            .AsReadOnly();
+                    if (!_fabricVersions.Any(c => c.Key == minecraftVersion))
+                        _fabricVersions[minecraftVersion] = versions;
 
-                        if (!_fabricVersions.Any(c => c.Key == minecraftVersion))
-                        {
-                            _fabricVersions[minecraftVersion] = versions;
-                        }
-
-                        if (_fabricVersions[minecraftVersion] is null || !_fabricVersions[minecraftVersion].Any())
-                        {
-                            throw new ArgumentOutOfRangeException(nameof(gameLoader), gameLoader, null);
-                        }
-
-                        return _fabricVersions[minecraftVersion];
-
-                    case GameLoader.LiteLoader:
-                        var liteLoaderVersionLoader = new LiteLoaderInstaller(new HttpClient());
-
-                        _liteLoaderVersions ??= await liteLoaderVersionLoader.GetAllLiteLoaders();
-
-                        return _liteLoaderVersions
-                            .Select(c => c)
-                            .Where(c => c.BaseVersion == minecraftVersion)
-                            .Select(c => c.Version)!;
-                    case GameLoader.NeoForge:
-                        var neoForge = new NeoForgeInstaller(anyLauncher);
-                        var neoForgeVersionMapper = new NeoForgeInstallerVersionMapper();
-
-                        if (!_neoForgeVersions.Any(c => c.Key == minecraftVersion))
-                        {
-                            _neoForgeVersions[minecraftVersion] = await neoForge.GetForgeVersions(minecraftVersion);
-                        }
-
-                        return _neoForgeVersions[minecraftVersion]
-                            .Select(c => neoForgeVersionMapper.CreateInstaller(c).VersionName)
-                            .Reverse();
-                    default:
+                    if (_fabricVersions[minecraftVersion] is null || !_fabricVersions[minecraftVersion].Any())
                         throw new ArgumentOutOfRangeException(nameof(gameLoader), gameLoader, null);
-                }
 
-                return [];
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
+                    return _fabricVersions[minecraftVersion];
 
-                throw new VersionNotLoadedException("Не удалось получить список версий для данного загрузчика, причина: " + e.Message);
-            }
-        }
+                case GameLoader.LiteLoader:
+                    var liteLoaderVersionLoader = new LiteLoaderInstaller(new HttpClient());
 
-        public Task ChangeBootstrapProgram(IGameProfile testGameProfile, IBootstrapProgram version)
-        {
-            return DownloadProfileAsync(testGameProfile, version);
-        }
+                    _liteLoaderVersions ??= await liteLoaderVersionLoader.GetAllLiteLoaders();
 
-        public Task AddFolderToWhiteList(IGameProfile profile, IFolderInfo folder)
-        {
-            AddWhiteListFolderIfNotExists(profile, folder);
+                    return _liteLoaderVersions
+                        .Select(c => c)
+                        .Where(c => c.BaseVersion == minecraftVersion)
+                        .Select(c => c.Version)!;
+                case GameLoader.NeoForge:
+                    var neoForge = new NeoForgeInstaller(anyLauncher);
+                    var neoForgeVersionMapper = new NeoForgeInstallerVersionMapper();
 
-            return SaveProfiles();
-        }
+                    if (!_neoForgeVersions.Any(c => c.Key == minecraftVersion))
+                        _neoForgeVersions[minecraftVersion] = await neoForge.GetForgeVersions(minecraftVersion);
 
-        private void AddWhiteListFolderIfNotExists(IGameProfile profile, IFolderInfo folder)
-        {
-            profile.FolderWhiteList ??= [];
-
-            if (profile.FolderWhiteList.Any(c => c == folder))
-            {
-                profile.FolderWhiteList.Add(folder);
-            }
-        }
-
-        public Task RemoveFolderFromWhiteList(IGameProfile profile, IFolderInfo folder)
-        {
-            profile.FolderWhiteList ??= [];
-
-            if (profile.FolderWhiteList.Any(c => c.Path == folder.Path))
-                return Task.CompletedTask;
-
-            profile.FolderWhiteList.Remove(folder);
-
-            return SaveProfiles();
-        }
-
-        public Task RemoveFolderFromWhiteList(IGameProfile profile, IEnumerable<IFolderInfo> folders)
-        {
-            foreach (var folder in folders)
-            {
-                RemoveWhiteListFolderIfNotExists(profile, folder);
+                    return _neoForgeVersions[minecraftVersion]
+                        .Select(c => neoForgeVersionMapper.CreateInstaller(c).VersionName)
+                        .Reverse();
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(gameLoader), gameLoader, null);
             }
 
-            return SaveProfiles();
+            return [];
         }
-
-        public Task AddFolderToWhiteList(IGameProfile profile, IEnumerable<IFolderInfo> folders)
+        catch (Exception e)
         {
-            foreach (var folder in folders)
-            {
-                AddWhiteListFolderIfNotExists(profile, folder);
-            }
+            Console.WriteLine(e);
 
-            return SaveProfiles();
+            throw new VersionNotLoadedException("Не удалось получить список версий для данного загрузчика, причина: " +
+                                                e.Message);
         }
+    }
 
-        public async Task CreateUserSessionAsync(IGameProfile profile, IUser user)
-        {
-            try
-            {
-                var skinsService = await _storageService.GetAsync<string>(StorageConstants.SkinUrl) ?? string.Empty;
-                var cloakService = await _storageService.GetAsync<string>(StorageConstants.CloakUrl) ?? string.Empty;
+    public Task ChangeBootstrapProgram(IGameProfile testGameProfile, IBootstrapProgram version)
+    {
+        return DownloadProfileAsync(testGameProfile, version);
+    }
 
-                var skinUrl = skinsService.Replace("{userName}", user.Name).Replace("{userUuid}", user.Uuid);
-                var cloakUrl = cloakService.Replace("{userName}", user.Name).Replace("{userUuid}", user.Uuid);
+    public Task AddFolderToWhiteList(IGameProfile profile, IFolderInfo folder)
+    {
+        AddWhiteListFolderIfNotExists(profile, folder);
 
-                if (user is Core.User.User player)
-                {
-                    Task[] tasks =
-                    [
-                        player.DownloadAndInstallCloakAsync(cloakUrl),
-                        player.DownloadAndInstallSkinAsync(skinUrl),
-                    ];
+        return SaveProfiles();
+    }
 
-                    Task.WaitAll(tasks);
+    public Task RemoveFolderFromWhiteList(IGameProfile profile, IFolderInfo folder)
+    {
+        profile.FolderWhiteList ??= [];
 
-                    await player.SaveUserAsync();
-                }
-            }
-            catch (Exception e)
-            {
-                //ToDo: Send to sentry
-            }
-
-        }
-
-        private void RemoveWhiteListFolderIfNotExists(IGameProfile profile, IFolderInfo folder)
-        {
-            profile.FolderWhiteList ??= [];
-
-            if (profile.FolderWhiteList.Any(c => c.Path == folder.Path))
-            {
-                profile.FolderWhiteList.FirstOrDefault(f => profile.FolderWhiteList.Remove(f));
-            }
-        }
-
-        private Task UpdateProfilesService(GameProfile gameProfile)
-        {
-            foreach (var server in gameProfile.Servers)
-            {
-                server.ServerProcedures = _gmlManager.Servers;
-                gameProfile.ServerAdded.OnNext(server);
-            }
-
-            gameProfile.State = ProfileState.Ready;
-            gameProfile.ProfileProcedures = this;
-            gameProfile.ServerProcedures = this;
-            gameProfile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, gameProfile, _notifications, _gmlManager.BugTracker);
-
+        if (profile.FolderWhiteList.Any(c => c.Path == folder.Path))
             return Task.CompletedTask;
-        }
 
-        public IEnumerable<IFileInfo> GetWhiteListFilesProfileFiles(IEnumerable<IFileInfo> files)
-        {
-            return files.Where(c => c.Directory.EndsWith("options.txt"));
-        }
+        profile.FolderWhiteList.Remove(folder);
 
-        /// <summary>
-        ///     Renames a folder name
-        /// </summary>
-        /// <param name="directory">The full directory of the folder</param>
-        /// <param name="newFolderName">New name of the folder</param>
-        /// <returns>Returns true if rename is successfull</returns>
-        public static bool RenameFolder(string directory, string newFolderName)
+        return SaveProfiles();
+    }
+
+    public Task RemoveFolderFromWhiteList(IGameProfile profile, IEnumerable<IFolderInfo> folders)
+    {
+        foreach (var folder in folders) RemoveWhiteListFolderIfNotExists(profile, folder);
+
+        return SaveProfiles();
+    }
+
+    public Task AddFolderToWhiteList(IGameProfile profile, IEnumerable<IFolderInfo> folders)
+    {
+        foreach (var folder in folders) AddWhiteListFolderIfNotExists(profile, folder);
+
+        return SaveProfiles();
+    }
+
+    public async Task CreateUserSessionAsync(IGameProfile profile, IUser user)
+    {
+        try
         {
-            try
+            var skinsService = await _storageService.GetAsync<string>(StorageConstants.SkinUrl) ?? string.Empty;
+            var cloakService = await _storageService.GetAsync<string>(StorageConstants.CloakUrl) ?? string.Empty;
+
+            var skinUrl = skinsService.Replace("{userName}", user.Name).Replace("{userUuid}", user.Uuid);
+            var cloakUrl = cloakService.Replace("{userName}", user.Name).Replace("{userUuid}", user.Uuid);
+
+            if (user is Core.User.User player)
             {
-                if (string.IsNullOrWhiteSpace(directory) ||
-                    string.IsNullOrWhiteSpace(newFolderName))
-                    return false;
+                Task[] tasks =
+                [
+                    player.DownloadAndInstallCloakAsync(cloakUrl),
+                    player.DownloadAndInstallSkinAsync(skinUrl)
+                ];
 
+                Task.WaitAll(tasks);
 
-                var oldDirectory = new DirectoryInfo(directory);
-
-                if (!oldDirectory.Exists) return false;
-
-                if (string.Equals(oldDirectory.Name, newFolderName, StringComparison.OrdinalIgnoreCase))
-                    //new folder name is the same with the old one.
-                    return false;
-
-                string newDirectory;
-
-                if (oldDirectory.Parent == null)
-                    //root directory
-                    newDirectory = Path.Combine(directory, newFolderName);
-                else
-                    newDirectory = Path.Combine(oldDirectory.Parent.FullName, newFolderName);
-
-                if (Directory.Exists(newDirectory)) Directory.Delete(newDirectory, true);
-
-                oldDirectory.MoveTo(newDirectory);
-
-                return true;
+                await player.SaveUserAsync();
             }
-            catch
-            {
-                //ignored
+        }
+        catch (Exception e)
+        {
+            //ToDo: Send to sentry
+        }
+    }
+
+    private async void RestoreProfile(GameProfile profile)
+    {
+        await UpdateProfilesService(profile);
+    }
+
+    private string NormalizePath(string directory, string fileDirectory)
+    {
+        directory = directory
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .Replace('/', Path.DirectorySeparatorChar);
+        // .TrimStart(Path.DirectorySeparatorChar);
+
+        fileDirectory = fileDirectory
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .Replace('/', Path.DirectorySeparatorChar)
+            .TrimStart(Path.DirectorySeparatorChar);
+
+        return Path.Combine(directory, fileDirectory);
+    }
+
+    private static void AddWhiteListFileIfNotExists(IGameProfile profile, IFileInfo file)
+    {
+        profile.FileWhiteList ??= [];
+
+        if (!profile.FileWhiteList.Any(c => c.Hash == file.Hash)) profile.FileWhiteList.Add(file);
+    }
+
+    private async Task<string> ConvertStreamToBase64Async(Stream stream)
+    {
+        using (var memoryStream = new MemoryStream())
+        {
+            await stream.CopyToAsync(memoryStream);
+            var fileBytes = memoryStream.ToArray();
+            return Convert.ToBase64String(fileBytes);
+        }
+    }
+
+    private async Task UpdateProfile(IGameProfile profile, string newProfileName, string newIcon,
+        string backgroundImageKey,
+        string newDescription, bool needRenameFolder, DirectoryInfo directory, DirectoryInfo newDirectory,
+        bool isEnabled,
+        string jvmArguments,
+        string gameArguments)
+    {
+        profile.Name = newProfileName;
+        profile.IconBase64 = newIcon;
+        profile.BackgroundImageKey = backgroundImageKey;
+        profile.Description = newDescription;
+        profile.IsEnabled = isEnabled;
+        profile.JvmArguments = jvmArguments;
+        profile.GameArguments = gameArguments;
+
+        profile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, profile, _notifications,
+            _gmlManager.BugTracker);
+
+        await SaveProfiles();
+        await RestoreProfiles();
+
+        if (needRenameFolder) RenameFolder(directory.FullName, newDirectory.FullName);
+    }
+
+    private void AddWhiteListFolderIfNotExists(IGameProfile profile, IFolderInfo folder)
+    {
+        profile.FolderWhiteList ??= [];
+
+        if (profile.FolderWhiteList.Any(c => c == folder)) profile.FolderWhiteList.Add(folder);
+    }
+
+    private void RemoveWhiteListFolderIfNotExists(IGameProfile profile, IFolderInfo folder)
+    {
+        profile.FolderWhiteList ??= [];
+
+        if (profile.FolderWhiteList.Any(c => c.Path == folder.Path))
+            profile.FolderWhiteList.FirstOrDefault(f => profile.FolderWhiteList.Remove(f));
+    }
+
+    private Task UpdateProfilesService(GameProfile gameProfile)
+    {
+        foreach (var server in gameProfile.Servers)
+        {
+            server.ServerProcedures = _gmlManager.Servers;
+            gameProfile.ServerAdded.OnNext(server);
+        }
+
+        gameProfile.State = ProfileState.Ready;
+        gameProfile.ProfileProcedures = this;
+        gameProfile.ServerProcedures = this;
+        gameProfile.GameLoader = new GameDownloaderProcedures(_launcherInfo, _storageService, gameProfile,
+            _notifications, _gmlManager.BugTracker);
+
+        return Task.CompletedTask;
+    }
+
+    public IEnumerable<IFileInfo> GetWhiteListFilesProfileFiles(IEnumerable<IFileInfo> files)
+    {
+        return files.Where(c => c.Directory.EndsWith("options.txt"));
+    }
+
+    /// <summary>
+    ///     Renames a folder name
+    /// </summary>
+    /// <param name="directory">The full directory of the folder</param>
+    /// <param name="newFolderName">New name of the folder</param>
+    /// <returns>Returns true if rename is successfull</returns>
+    public static bool RenameFolder(string directory, string newFolderName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(directory) ||
+                string.IsNullOrWhiteSpace(newFolderName))
                 return false;
-            }
+
+
+            var oldDirectory = new DirectoryInfo(directory);
+
+            if (!oldDirectory.Exists) return false;
+
+            if (string.Equals(oldDirectory.Name, newFolderName, StringComparison.OrdinalIgnoreCase))
+                //new folder name is the same with the old one.
+                return false;
+
+            string newDirectory;
+
+            if (oldDirectory.Parent == null)
+                //root directory
+                newDirectory = Path.Combine(directory, newFolderName);
+            else
+                newDirectory = Path.Combine(oldDirectory.Parent.FullName, newFolderName);
+
+            if (Directory.Exists(newDirectory)) Directory.Delete(newDirectory, true);
+
+            oldDirectory.MoveTo(newDirectory);
+
+            return true;
+        }
+        catch
+        {
+            //ignored
+            return false;
         }
     }
 }

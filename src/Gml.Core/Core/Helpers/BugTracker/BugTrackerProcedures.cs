@@ -4,12 +4,9 @@ using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Gml.Core.Launcher;
 using Gml.Core.Services.Storage;
-using Gml.Models.Converters;
-using Gml.Models.Storage;
 using GmlCore.Interfaces.Launcher;
 using GmlCore.Interfaces.Procedures;
 using GmlCore.Interfaces.Sentry;
@@ -18,10 +15,10 @@ namespace Gml.Core.Helpers.BugTracker;
 
 public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
 {
-    private readonly IStorageService _storage;
-    private readonly IGmlSettings _settings;
-    private readonly ISubject<IBugInfo> _bugStream = new Subject<IBugInfo>();
     private readonly BlockingCollection<IBugInfo> _bugQueue = new();
+    private readonly ISubject<IBugInfo> _bugStream = new Subject<IBugInfo>();
+    private readonly IGmlSettings _settings;
+    private readonly IStorageService _storage;
     private readonly IDisposable _subscription;
 
     public BugTrackerProcedures(IStorageService storage, IGmlSettings settings) : base("BugStorage.json")
@@ -36,24 +33,6 @@ public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
         Task.Run(ProcessQueueAsync);
 
         _ = LoadUnprocessedBugsFromStorage();
-    }
-
-    private async Task ProcessQueueAsync()
-    {
-        foreach (var bug in _bugQueue.GetConsumingEnumerable())
-        {
-            await SaveBugAsync(bug);
-        }
-    }
-
-    private async Task LoadUnprocessedBugsFromStorage()
-    {
-        await LoadUnprocessedBugsAsync();
-
-        foreach (var bug in _bugBuffer.Values)
-        {
-            _bugStream.OnNext(bug);
-        }
     }
 
     public void CaptureException(IBugInfo bugInfo)
@@ -71,7 +50,6 @@ public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
 
     public IBugInfo CaptureException(Exception exception)
     {
-
         return new BugInfo
         {
             SendAt = DateTime.Now,
@@ -83,7 +61,7 @@ public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
             OsVersion = "GmlServer",
             Exceptions = new List<ExceptionReport>
             {
-                new ExceptionReport
+                new()
                 {
                     Type = exception.GetType().FullName,
                     Module = exception.GetType().Assembly.FullName,
@@ -93,13 +71,40 @@ public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
                     {
                         new StackTrace
                         {
-                            Function = exception.StackTrace,
+                            Function = exception.StackTrace
                         }
                     }
                 }
             },
-            ProjectType = ProjectType.Backend,
+            ProjectType = ProjectType.Backend
         };
+    }
+
+    public async Task<IEnumerable<IBugInfo>> GetAllBugs()
+    {
+        return await _storage.GetBugsAsync<BugInfo>();
+    }
+
+    public async Task<IBugInfo?> GetBugId(Guid id)
+    {
+        return await _storage.GetBugIdAsync(id);
+    }
+
+    public Task<IEnumerable<IBugInfo>> GetFilteredBugs(Expression<Func<IStorageBug, bool>> filter)
+    {
+        return _storage.GetFilteredBugsAsync(filter);
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        foreach (var bug in _bugQueue.GetConsumingEnumerable()) await SaveBugAsync(bug);
+    }
+
+    private async Task LoadUnprocessedBugsFromStorage()
+    {
+        await LoadUnprocessedBugsAsync();
+
+        foreach (var bug in _bugBuffer.Values) _bugStream.OnNext(bug);
     }
 
     private async Task ProcessBugAsync(IBugInfo bug)
@@ -119,20 +124,5 @@ public class BugTrackerProcedures : FileStorageService, IBugTrackerProcedures
     public void StopProcessing()
     {
         _subscription.Dispose();
-    }
-
-    public async Task<IEnumerable<IBugInfo>> GetAllBugs()
-    {
-        return await _storage.GetBugsAsync<BugInfo>();
-    }
-
-    public async Task<IBugInfo?> GetBugId(Guid id)
-    {
-        return await _storage.GetBugIdAsync(id);
-    }
-
-    public Task<IEnumerable<IBugInfo>> GetFilteredBugs(Expression<Func<IStorageBug, bool>> filter)
-    {
-        return _storage.GetFilteredBugsAsync(filter);
     }
 }

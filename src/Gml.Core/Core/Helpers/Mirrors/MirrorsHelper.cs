@@ -12,7 +12,7 @@ public class MirrorsHelper
                 "https://mirror.recloud.host/openjdk-22_linux-x64_bin.zip",
                 "https://mr-1.recloud.tech/openjdk-22_linux-x64_bin.zip",
                 "https://mr-2.recloud.tech/openjdk-22_linux-x64_bin.zip",
-                "https://mr-3.recloud.tech/openjdk-22_linux-x64_bin.zip",
+                "https://mr-3.recloud.tech/openjdk-22_linux-x64_bin.zip"
             ]
         },
         {
@@ -21,9 +21,9 @@ public class MirrorsHelper
                 "https://mirror.recloud.host/openjdk-22_windows-x64_bin.zip",
                 "https://mr-1.recloud.tech/openjdk-22_windows-x64_bin.zip",
                 "https://mr-2.recloud.tech/openjdk-22_windows-x64_bin.zip",
-                "https://mr-3.recloud.tech/openjdk-22_windows-x64_bin.zip",
+                "https://mr-3.recloud.tech/openjdk-22_windows-x64_bin.zip"
             ]
-        },
+        }
     };
 
     public static Dictionary<string, string[]> DotnetMirrors = new()
@@ -34,7 +34,7 @@ public class MirrorsHelper
                 "https://mirror.recloud.host/dotnet-sdk-8.0.302-linux-x64.zip",
                 "https://mr-1.recloud.tech/dotnet-sdk-8.0.302-linux-x64.zip",
                 "https://mr-2.recloud.tech/dotnet-sdk-8.0.302-linux-x64.zip",
-                "https://mr-3.recloud.tech/dotnet-sdk-8.0.302-linux-x64.zip",
+                "https://mr-3.recloud.tech/dotnet-sdk-8.0.302-linux-x64.zip"
             ]
         },
         {
@@ -43,8 +43,8 @@ public class MirrorsHelper
                 "https://mirror.recloud.host/dotnet-sdk-8.0.302-win-x64.zip",
                 "https://mr-1.recloud.tech/dotnet-sdk-8.0.302-win-x64.zip",
                 "https://mr-2.recloud.tech/dotnet-sdk-8.0.302-win-x64.zip",
-                "https://mr-3.recloud.tech/dotnet-sdk-8.0.302-win-x64.zip",
+                "https://mr-3.recloud.tech/dotnet-sdk-8.0.302-win-x64.zip"
             ]
-        },
+        }
     };
 }

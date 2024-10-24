@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -16,237 +15,235 @@ using Newtonsoft.Json;
 using SQLite;
 using JsonSerializer = System.Text.Json.JsonSerializer;
 
-namespace Gml.Core.Services.Storage
+namespace Gml.Core.Services.Storage;
+
+public class SqliteStorageService : IStorageService
 {
-    public class SqliteStorageService : IStorageService
+    private const string DatabaseFileName = "data.db";
+    private readonly SQLiteAsyncConnection _database;
+    private readonly string _databasePath;
+    private readonly IGmlSettings _settings;
+    private readonly JsonSerializerSettings _bugsConverter;
+
+    public SqliteStorageService(IGmlSettings settings)
     {
-        private const string DatabaseFileName = "data.db";
-        private readonly SQLiteAsyncConnection _database;
-        private readonly string _databasePath;
-        private readonly IGmlSettings _settings;
-        private JsonSerializerSettings _bugsConverter;
+        _settings = settings;
+        _databasePath = Path.Combine(settings.InstallationDirectory, DatabaseFileName);
+        _database = new SQLiteAsyncConnection(_databasePath);
 
-        public SqliteStorageService(IGmlSettings settings)
+        _bugsConverter = new JsonSerializerSettings
         {
-            _settings = settings;
-            _databasePath = Path.Combine(settings.InstallationDirectory, DatabaseFileName);
-            _database = new SQLiteAsyncConnection(_databasePath);
+            TypeNameHandling = TypeNameHandling.Objects,
 
-            _bugsConverter = new JsonSerializerSettings
-            {
-                TypeNameHandling = TypeNameHandling.Objects,
+            Converters = new List<JsonConverter>
+                { new MemoryInfoConverter(), new ExceptionReportConverter(), new StackTraceConverter() }
+        };
 
-                Converters = new List<JsonConverter> { new MemoryInfoConverter(), new ExceptionReportConverter(), new StackTraceConverter() }
-            };
+        InitializeTables();
+    }
 
-            InitializeTables();
-        }
-
-        public async Task SetAsync<T>(string key, T? value)
+    public async Task SetAsync<T>(string key, T? value)
+    {
+        var serializedValue = JsonSerializer.Serialize(value);
+        var storageItem = new StorageItem
         {
-            var serializedValue = JsonSerializer.Serialize(value);
-            var storageItem = new StorageItem
-            {
-                Key = key,
-                TypeName = typeof(T).FullName,
-                Value = serializedValue
-            };
+            Key = key,
+            TypeName = typeof(T).FullName,
+            Value = serializedValue
+        };
 
-            await _database.InsertOrReplaceAsync(storageItem);
-        }
+        await _database.InsertOrReplaceAsync(storageItem);
+    }
 
-        public async Task<T?> GetAsync<T>(string key)
+    public async Task<T?> GetAsync<T>(string key)
+    {
+        var storageItem = await _database.Table<StorageItem>()
+            .Where(si => si.Key == key)
+            .FirstOrDefaultAsync();
+
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value)
+            : default;
+    }
+
+    public async Task<T?> GetUserAsync<T>(string login, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.Login == login)
+            .FirstOrDefaultAsync();
+
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
+
+    public async Task<T?> GetUserBySkinAsync<T>(string guid, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.SkinGuid == guid)
+            .FirstOrDefaultAsync();
+
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
+
+    public async Task SetUserAsync<T>(string login, string uuid, T value)
+    {
+        var serializedValue = JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true });
+        var storageItem = new UserStorageItem
         {
-            var storageItem = await _database.Table<StorageItem>()
-                .Where(si => si.Key == key)
-                .FirstOrDefaultAsync();
+            Login = login,
+            Uuid = uuid,
+            SkinGuid = (value as IUser)?.TextureSkinGuid,
+            CloakGuid = (value as IUser)?.TextureCloakGuid,
+            TypeName = typeof(T).FullName,
+            Value = serializedValue
+        };
 
-            return storageItem != null
-                ?  JsonSerializer.Deserialize<T>(storageItem.Value)
-                : default;
-        }
+        await _database.InsertOrReplaceAsync(storageItem);
+    }
 
-        public async Task<T?> GetUserAsync<T>(string login, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.Login == login)
-                .FirstOrDefaultAsync();
-
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
-
-        public async Task<T?> GetUserBySkinAsync<T>(string guid, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.SkinGuid == guid)
-                .FirstOrDefaultAsync();
-
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
-
-        public async Task SetUserAsync<T>(string login, string uuid, T value)
-        {
-            var serializedValue = JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true });
-            var storageItem = new UserStorageItem
-            {
-                Login = login,
-                Uuid = uuid,
-                SkinGuid = (value as IUser)?.TextureSkinGuid,
-                CloakGuid = (value as IUser)?.TextureCloakGuid,
-                TypeName = typeof(T).FullName,
-                Value = serializedValue
-            };
-
-            await _database.InsertOrReplaceAsync(storageItem);
-        }
-
-        public async Task<IEnumerable<T>> GetUsersAsync<T>(JsonSerializerOptions jsonSerializerOptions)
-        {
-            var users = (await _database
+    public async Task<IEnumerable<T>> GetUsersAsync<T>(JsonSerializerOptions jsonSerializerOptions)
+    {
+        var users = (await _database
                 .Table<UserStorageItem>()
                 .ToListAsync())
-                .Select(x => JsonSerializer.Deserialize<T>(x.Value, jsonSerializerOptions));
+            .Select(x => JsonSerializer.Deserialize<T>(x.Value, jsonSerializerOptions));
 
-            return users!;
-        }
+        return users!;
+    }
 
-        public async Task AddBugAsync(IBugInfo bugInfo)
+    public async Task AddBugAsync(IBugInfo bugInfo)
+    {
+        var serializedValue = JsonSerializer.Serialize(bugInfo, new JsonSerializerOptions { WriteIndented = true });
+
+        var storageItem = new BugItem
         {
-            var serializedValue = JsonSerializer.Serialize(bugInfo, new JsonSerializerOptions { WriteIndented = true });
+            Date = DateTime.Now,
+            ProjectType = bugInfo.ProjectType,
+            Guid = Guid.Parse(bugInfo.Id),
+            Attachment = string.Empty,
+            Value = serializedValue
+        };
 
-            var storageItem = new BugItem
+        await _database.InsertAsync(storageItem);
+    }
+
+    public async Task ClearBugsAsync()
+    {
+        await _database.DropTableAsync<BugItem>();
+        await _database.CreateTableAsync<BugItem>();
+    }
+
+    public async Task<IEnumerable<T>> GetBugsAsync<T>()
+    {
+        var bugs = await _database
+            .Table<BugItem>()
+            .ToListAsync();
+
+        var listBugs = bugs.Select(x => JsonConvert.DeserializeObject<T>(x.Value,
+            new JsonSerializerSettings
             {
-                Date = DateTime.Now,
-                ProjectType = bugInfo.ProjectType,
-                Guid = Guid.Parse(bugInfo.Id),
-                Attachment = string.Empty,
-                Value = serializedValue
-            };
+                TypeNameHandling = TypeNameHandling.Objects,
+                Converters = new List<JsonConverter>
+                    { new MemoryInfoConverter(), new ExceptionReportConverter(), new StackTraceConverter() }
+            }));
 
-            await _database.InsertAsync(storageItem);
-        }
+        return listBugs!;
+    }
 
-        public async Task ClearBugsAsync()
-        {
-            await _database.DropTableAsync<BugItem>();
-            await _database.CreateTableAsync<BugItem>();
-        }
+    public async Task<IBugInfo?> GetBugIdAsync(Guid id)
+    {
+        var bug = await _database
+            .Table<BugItem>()
+            .FirstOrDefaultAsync(c => c.Guid == id);
 
-        public async Task<IEnumerable<T>> GetBugsAsync<T>()
-        {
-            var bugs = await _database
-                    .Table<BugItem>()
-                    .ToListAsync();
+        return JsonConvert.DeserializeObject<BugInfo>(bug.Value, _bugsConverter);
+    }
 
-            var listBugs = bugs.Select(x => JsonConvert.DeserializeObject<T>(x.Value,
-                new JsonSerializerSettings
-                {
-                    TypeNameHandling = TypeNameHandling.Objects,
-                    Converters = new List<JsonConverter>
-                        { new MemoryInfoConverter(), new ExceptionReportConverter(), new StackTraceConverter() }
-                }));
+    public async Task<IEnumerable<IBugInfo>> GetFilteredBugsAsync(Expression<Func<IStorageBug, bool>> filter)
+    {
+        var parameter = Expression.Parameter(typeof(BugItem), "bug");
 
-            return listBugs!;
-        }
+        var body = RebindParameter(filter.Body, filter.Parameters[0], parameter);
+        var newFilter = Expression.Lambda<Func<BugItem, bool>>(body, parameter);
 
-        public async Task<IBugInfo?> GetBugIdAsync(Guid id)
-        {
-            var bug = await _database
-                .Table<BugItem>()
-                .FirstOrDefaultAsync(c => c.Guid == id);
+        var storageItems = await _database.Table<BugItem>()
+            .Where(newFilter)
+            .ToListAsync();
 
-            return JsonConvert.DeserializeObject<BugInfo>(bug.Value, _bugsConverter);
-        }
+        if (storageItems is null || !storageItems.Any()) return [];
 
-        public async Task<IEnumerable<IBugInfo>> GetFilteredBugsAsync(Expression<Func<IStorageBug, bool>> filter)
-        {
-            var parameter = Expression.Parameter(typeof(BugItem), "bug");
+        var json = string.Concat("[", string.Join(',', storageItems.Select(c => c.Value)), "]");
 
-            var body = RebindParameter(filter.Body, filter.Parameters[0], parameter);
-            var newFilter = Expression.Lambda<Func<BugItem, bool>>(body, parameter);
+        return JsonConvert.DeserializeObject<List<BugInfo>>(json, _bugsConverter) ?? [];
+    }
 
-            var storageItems = await _database.Table<BugItem>()
-                .Where(newFilter)
-                .ToListAsync();
+    public Task<int> SaveRecord<T>(T record)
+    {
+        return _database.InsertOrReplaceAsync(record);
+    }
 
-            if (storageItems is null || !storageItems.Any())
-            {
-                return [];
-            }
+    public async Task<T?> GetUserByNameAsync<T>(string userName, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.Login == userName)
+            .FirstOrDefaultAsync();
 
-            var json = string.Concat("[",string.Join(',', storageItems.Select(c => c.Value)), "]");
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
 
-            return JsonConvert.DeserializeObject<List<BugInfo>>(json, _bugsConverter) ?? [];
-        }
+    public async Task<T?> GetUserByAccessToken<T>(string accessToken, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.AccessToken == accessToken)
+            .FirstOrDefaultAsync();
 
-        private static Expression RebindParameter(Expression body, ParameterExpression oldParameter, ParameterExpression newParameter)
-        {
-            return new ReplaceParameterVisitor(oldParameter, newParameter).Visit(body);
-        }
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
 
-        public Task<int> SaveRecord<T>(T record)
-        {
-            return _database.InsertOrReplaceAsync(record);
-        }
+    public async Task<T?> GetUserByUuidAsync<T>(string uuid, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.Uuid.ToLower() == uuid.ToLower())
+            .FirstOrDefaultAsync();
 
-        public async Task<T?> GetUserByNameAsync<T>(string userName, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.Login == userName)
-                .FirstOrDefaultAsync();
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
 
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
+    public async Task<T?> GetUserByCloakAsync<T>(string guid, JsonSerializerOptions jsonSerializerOptions)
+    {
+        var storageItem = await _database.Table<UserStorageItem>()
+            .Where(si => si.CloakGuid == guid)
+            .FirstOrDefaultAsync();
 
-        public async Task<T?> GetUserByAccessToken<T>(string accessToken, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.AccessToken == accessToken)
-                .FirstOrDefaultAsync();
+        return storageItem != null
+            ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
+            : default;
+    }
 
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
+    private static Expression RebindParameter(Expression body, ParameterExpression oldParameter,
+        ParameterExpression newParameter)
+    {
+        return new ReplaceParameterVisitor(oldParameter, newParameter).Visit(body);
+    }
 
-        public async Task<T?> GetUserByUuidAsync<T>(string uuid, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.Uuid.ToLower() == uuid.ToLower())
-                .FirstOrDefaultAsync();
+    private void InitializeTables()
+    {
+        var fileInfo = new FileInfo(_databasePath);
 
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
+        if (!fileInfo.Directory!.Exists)
+            fileInfo.Directory.Create();
 
-        public async Task<T?> GetUserByCloakAsync<T>(string guid, JsonSerializerOptions jsonSerializerOptions)
-        {
-            var storageItem = await _database.Table<UserStorageItem>()
-                .Where(si => si.CloakGuid == guid)
-                .FirstOrDefaultAsync();
-
-            return storageItem != null
-                ? JsonSerializer.Deserialize<T>(storageItem.Value, jsonSerializerOptions)
-                : default;
-        }
-
-        private void InitializeTables()
-        {
-            var fileInfo = new FileInfo(_databasePath);
-
-            if (!fileInfo.Directory!.Exists)
-                fileInfo.Directory.Create();
-
-            _database.CreateTableAsync<StorageItem>().Wait();
-            _database.CreateTableAsync<UserStorageItem>().Wait();
-            _database.CreateTableAsync<BugItem>().Wait();
-        }
+        _database.CreateTableAsync<StorageItem>().Wait();
+        _database.CreateTableAsync<UserStorageItem>().Wait();
+        _database.CreateTableAsync<BugItem>().Wait();
     }
 }

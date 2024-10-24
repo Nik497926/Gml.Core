@@ -13,10 +13,10 @@ namespace Gml.Core.Helpers.Notifications;
 
 public class NotificationProcedures(IStorageService storage) : INotificationProcedures
 {
-    private ISubject<INotification> _notifications = new Subject<INotification>();
+    private readonly ISubject<INotification> _notifications = new Subject<INotification>();
+    private List<Notification> _notificationsHistory = new();
     public IObservable<INotification> Notifications => _notifications;
     public IEnumerable<INotification> History => _notificationsHistory;
-    private List<Notification> _notificationsHistory = new();
 
     public async Task SendMessage(string message)
     {

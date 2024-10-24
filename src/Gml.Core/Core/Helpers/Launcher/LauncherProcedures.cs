@@ -8,9 +8,7 @@ using System.Reactive.Subjects;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Gml.Core.Constants;
-using Gml.Core.Launcher;
 using Gml.Core.Services.Storage;
-using Gml.Web.Api.Domains.System;
 using GmlCore.Interfaces.Launcher;
 using GmlCore.Interfaces.Procedures;
 using GmlCore.Interfaces.Storage;
@@ -19,14 +17,12 @@ namespace Gml.Core.Helpers.Launcher;
 
 public class LauncherProcedures : ILauncherProcedures
 {
-    private readonly ILauncherInfo _launcherInfo;
-    private readonly IStorageService _storage;
     private readonly IFileStorageProcedures _files;
-    private ISubject<string> _buildLogs = new Subject<string>();
+    private readonly ILauncherInfo _launcherInfo;
     private readonly Subject<string> _logsBuffer;
-    public IObservable<string> BuildLogs => _buildLogs;
+    private readonly IStorageService _storage;
 
-    private string[] _allowedVersions =
+    private readonly string[] _allowedVersions =
     [
         "win-x86",
         "win-x64",
@@ -38,6 +34,8 @@ public class LauncherProcedures : ILauncherProcedures
         "linux-x64"
     ];
 
+    private readonly ISubject<string> _buildLogs = new Subject<string>();
+
     public LauncherProcedures(ILauncherInfo launcherInfo, IStorageService storage, IFileStorageProcedures files)
     {
         _logsBuffer = new Subject<string>();
@@ -47,10 +45,7 @@ public class LauncherProcedures : ILauncherProcedures
             .Select(items => string.Join(Environment.NewLine, items))
             .Subscribe(combinedText =>
             {
-                if (!string.IsNullOrEmpty(combinedText))
-                {
-                    _buildLogs.OnNext(combinedText);
-                }
+                if (!string.IsNullOrEmpty(combinedText)) _buildLogs.OnNext(combinedText);
             });
 
         _launcherInfo = launcherInfo;
@@ -58,9 +53,10 @@ public class LauncherProcedures : ILauncherProcedures
         _files = files;
     }
 
+    public IObservable<string> BuildLogs => _buildLogs;
+
     public async Task<string> CreateVersion(IVersionFile version, ILauncherBuild launcherBuild)
     {
-
         var versions = Directory
             .GetDirectories(launcherBuild.Path)
             .Select(c => new DirectoryInfo(c));
@@ -77,9 +73,8 @@ public class LauncherProcedures : ILauncherProcedures
                 .FirstOrDefault(file => !file.Extension.Equals(".pdb", StringComparison.OrdinalIgnoreCase));
 
             if (executeFile != null)
-            {
-                localVersion!.Guid = await _files.LoadFile(File.OpenRead(executeFile.FullName), Path.Combine("launcher", osName, osArch), $"{versionInfo.Name}-{executeFile.Name}");
-            }
+                localVersion!.Guid = await _files.LoadFile(File.OpenRead(executeFile.FullName),
+                    Path.Combine("launcher", osName, osArch), $"{versionInfo.Name}-{executeFile.Name}");
 
             _launcherInfo.ActualLauncherVersion[versionInfo.Name] = localVersion;
             await _storage.SetAsync(StorageConstants.ActualVersion, version.Version);
@@ -104,21 +99,18 @@ public class LauncherProcedures : ILauncherProcedures
         // version.File = null;
 
         return version.Guid;
-
     }
 
     public async Task Build(string version, string[] osNameVersions)
     {
-        var projectPath = new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version)).GetDirectories().First().FullName;
+        var projectPath = new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version))
+            .GetDirectories().First().FullName;
         var launcherDirectory = new DirectoryInfo(Path.Combine(projectPath, "src", "Gml.Launcher"));
 
         if (!Directory.Exists(projectPath))
-        {
             throw new DirectoryNotFoundException("Нет исходников для формирования бинарных файлов!");
-        }
 
         var buildFolder = await CreateBuilds(osNameVersions, projectPath, launcherDirectory);
-
     }
 
     public bool CanCompile(string version, out string message)
@@ -127,11 +119,13 @@ public class LauncherProcedures : ILauncherProcedures
 
         if (!Directory.Exists(versionDirectory))
         {
-            message = $"Не загружена сборка профиля для версии \"{version}\", загрузите ее на сервер в папку: \"{Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version)}\"";
+            message =
+                $"Не загружена сборка профиля для версии \"{version}\", загрузите ее на сервер в папку: \"{Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version)}\"";
             return false;
         }
 
-        var projectPath = new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version))?.GetDirectories().FirstOrDefault()?.FullName;
+        var projectPath = new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "Launcher", version))
+            ?.GetDirectories().FirstOrDefault()?.FullName;
 
         if (string.IsNullOrEmpty(projectPath))
         {
@@ -145,7 +139,8 @@ public class LauncherProcedures : ILauncherProcedures
 
         if (!projects.Any(c => c.Name.StartsWith("Gml.Client")))
         {
-            message = $"Не удалось найти проект по пути: Gml.Client. Убедитесь, что проект загружен на сервер полностью. " +
+            message =
+                "Не удалось найти проект по пути: Gml.Client. Убедитесь, что проект загружен на сервер полностью. " +
                 "Подробная инструкция доступна на wiki.recloud.tech: \n" +
                 "Клиентская часть / Сборка лаунчера / Сборка из панели / Загрузка исходных файлов / Пункт 2. Загрузка";
             return false;
@@ -153,7 +148,7 @@ public class LauncherProcedures : ILauncherProcedures
 
         if (!projects.Any(c => c.Name.StartsWith("GamerVII.Notification.Avalonia")))
         {
-            message = $"Не удалось найти проект по пути: Gml.Client. Убедитесь, что проект загружен на сервер полностью";
+            message = "Не удалось найти проект по пути: Gml.Client. Убедитесь, что проект загружен на сервер полностью";
             return false;
         }
 
@@ -172,17 +167,15 @@ public class LauncherProcedures : ILauncherProcedures
 
         foreach (var version in versions)
         {
-            if (!_allowedVersions.Contains(version))
-            {
-                continue;
-            }
+            if (!_allowedVersions.Contains(version)) continue;
 
             ProcessStartInfo? processStartInfo = default;
             var command = string.Empty;
 
-            if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                command = $"/c {dotnetPath} publish ./src/Gml.Launcher/ -r {version} -c Release -f net8.0 -p:PublishSingleFile=true --self-contained true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:PublishReadyToRun=true";
+                command =
+                    $"/c {dotnetPath} publish ./src/Gml.Launcher/ -r {version} -c Release -f net8.0 -p:PublishSingleFile=true --self-contained true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:PublishReadyToRun=true";
                 processStartInfo = new ProcessStartInfo("cmd", command)
                 {
                     WorkingDirectory = projectPath
@@ -190,7 +183,8 @@ public class LauncherProcedures : ILauncherProcedures
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                command = $"{dotnetPath} publish ./src/Gml.Launcher/ -r {version} -c Release -f net8.0 -p:PublishSingleFile=true --self-contained true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:PublishReadyToRun=true";
+                command =
+                    $"{dotnetPath} publish ./src/Gml.Launcher/ -r {version} -c Release -f net8.0 -p:PublishSingleFile=true --self-contained true -p:IncludeNativeLibrariesForSelfExtract=true -p:IncludeAllContentForSelfExtract=true -p:PublishReadyToRun=true";
                 processStartInfo = new ProcessStartInfo("/bin/bash", "-c \"" + command + "\"")
                 {
                     WorkingDirectory = projectPath
@@ -208,8 +202,10 @@ public class LauncherProcedures : ILauncherProcedures
                     StartInfo = processStartInfo
                 };
 
-                process.OutputDataReceived += (sender, e) => _logsBuffer.OnNext($"[{DateTime.Now:HH:m:ss:fff}] [INFO] {e.Data}");
-                process.ErrorDataReceived += (sender, e) => _logsBuffer.OnNext($"[{DateTime.Now:HH:m:ss:fff}] [INFO] {e.Data}");
+                process.OutputDataReceived += (sender, e) =>
+                    _logsBuffer.OnNext($"[{DateTime.Now:HH:m:ss:fff}] [INFO] {e.Data}");
+                process.ErrorDataReceived += (sender, e) =>
+                    _logsBuffer.OnNext($"[{DateTime.Now:HH:m:ss:fff}] [INFO] {e.Data}");
 
                 process.Start();
 
@@ -226,18 +222,12 @@ public class LauncherProcedures : ILauncherProcedures
         var buildsFolder = new DirectoryInfo(Path.Combine(_launcherInfo.InstallationDirectory, "LauncherBuilds",
             $"build-{DateTime.Now:dd-MM-yyyy HH-mm-ss}"));
 
-        if (!buildsFolder.Exists)
-        {
-            buildsFolder.Create();
-        }
+        if (!buildsFolder.Exists) buildsFolder.Create();
 
-        foreach (DirectoryInfo dir in publishDirectory)
+        foreach (var dir in publishDirectory)
         {
             var newFolder = new DirectoryInfo(Path.Combine(buildsFolder.FullName, dir.Parent.Name));
-            if (!newFolder.Exists)
-            {
-                newFolder.Create();
-            }
+            if (!newFolder.Exists) newFolder.Create();
 
             CopyDirectory(dir, newFolder);
         }
@@ -247,19 +237,11 @@ public class LauncherProcedures : ILauncherProcedures
 
     private static void CopyDirectory(DirectoryInfo source, DirectoryInfo destination)
     {
-        if (!destination.Exists)
-        {
-            destination.Create();
-        }
+        if (!destination.Exists) destination.Create();
 
-        foreach (FileInfo file in source.GetFiles())
-        {
-            file.CopyTo(Path.Combine(destination.FullName, file.Name), true);
-        }
+        foreach (var file in source.GetFiles()) file.CopyTo(Path.Combine(destination.FullName, file.Name), true);
 
-        foreach (DirectoryInfo subDir in source.GetDirectories())
-        {
+        foreach (var subDir in source.GetDirectories())
             CopyDirectory(subDir, new DirectoryInfo(Path.Combine(destination.FullName, subDir.Name)));
-        }
     }
 }

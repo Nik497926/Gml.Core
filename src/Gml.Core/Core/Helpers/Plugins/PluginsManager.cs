@@ -1,9 +1,8 @@
 using System.Runtime.Loader;
 
-namespace Gml.Core.Helpers.Plugins
+namespace Gml.Core.Helpers.Plugins;
+
+public class PluginsManager
 {
-    public class PluginsManager
-    {
-        private readonly AssemblyLoadContext _assemblyContext;
-    }
+    private readonly AssemblyLoadContext _assemblyContext;
 }
