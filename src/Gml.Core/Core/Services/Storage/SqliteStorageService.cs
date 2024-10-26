@@ -20,10 +20,10 @@ namespace Gml.Core.Services.Storage;
 public class SqliteStorageService : IStorageService
 {
     private const string DatabaseFileName = "data.db";
+    private readonly JsonSerializerSettings _bugsConverter;
     private readonly SQLiteAsyncConnection _database;
     private readonly string _databasePath;
     private readonly IGmlSettings _settings;
-    private readonly JsonSerializerSettings _bugsConverter;
 
     public SqliteStorageService(IGmlSettings settings)
     {

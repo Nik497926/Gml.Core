@@ -22,12 +22,12 @@ namespace Gml.Core.Helpers.Game;
 public class GameDownloaderProcedures : IGameDownloaderProcedures
 {
     private readonly IBugTrackerProcedures _bugTracker;
+    private readonly ConcurrentDictionary<string, string> _fileHashCache = new();
     private readonly GameDownloader _gameLoader;
     private readonly ILauncherInfo _launcherInfo;
     private readonly IGameProfile _profile;
     private readonly IStorageService _storageService;
     private Dictionary<GameLoader, Func<string, Task<string>>> _downloadMethods;
-    private readonly ConcurrentDictionary<string, string> _fileHashCache = new();
 
     public GameDownloaderProcedures(ILauncherInfo launcherInfo,
         IStorageService storageService,

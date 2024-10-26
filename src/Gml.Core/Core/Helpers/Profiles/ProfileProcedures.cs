@@ -40,20 +40,21 @@ public partial class ProfileProcedures : IProfileProcedures
     private const string AuthLibUrl =
         "https://github.com/Gml-Launcher/Gml.Authlib.Injector/releases/download/authlib-injector-1.2.5-alpha-1/authlib-injector-1.2.5-alpha-1.jar";
 
-    private readonly GmlManager _gmlManager;
-
-    private readonly ILauncherInfo _launcherInfo;
-    private readonly INotificationProcedures _notifications;
-    private readonly IStorageService _storageService;
     private readonly ConcurrentDictionary<string, IEnumerable<string>> _fabricVersions = new();
     private readonly ConcurrentDictionary<string, string> _fileHashCache = new();
     private readonly ConcurrentDictionary<string, IEnumerable<ForgeVersion>>? _forgeVersions = new();
-    private List<IGameProfile> _gameProfiles = new();
-    private IReadOnlyList<LiteLoaderVersion>? _liteLoaderVersions;
+
+    private readonly GmlManager _gmlManager;
+
+    private readonly ILauncherInfo _launcherInfo;
     private readonly ConcurrentDictionary<string, IEnumerable<NeoForgeVersion>>? _neoForgeVersions = new();
+    private readonly INotificationProcedures _notifications;
 
     private readonly ISubject<double> _packChanged = new Subject<double>();
     private readonly ISubject<int> _profilesChanged = new Subject<int>();
+    private readonly IStorageService _storageService;
+    private List<IGameProfile> _gameProfiles = new();
+    private IReadOnlyList<LiteLoaderVersion>? _liteLoaderVersions;
     private VersionMetadataCollection? _vanillaVersions;
 
     public ProfileProcedures(

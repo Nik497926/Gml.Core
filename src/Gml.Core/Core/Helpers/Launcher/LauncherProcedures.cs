@@ -17,11 +17,6 @@ namespace Gml.Core.Helpers.Launcher;
 
 public class LauncherProcedures : ILauncherProcedures
 {
-    private readonly IFileStorageProcedures _files;
-    private readonly ILauncherInfo _launcherInfo;
-    private readonly Subject<string> _logsBuffer;
-    private readonly IStorageService _storage;
-
     private readonly string[] _allowedVersions =
     [
         "win-x86",
@@ -35,6 +30,10 @@ public class LauncherProcedures : ILauncherProcedures
     ];
 
     private readonly ISubject<string> _buildLogs = new Subject<string>();
+    private readonly IFileStorageProcedures _files;
+    private readonly ILauncherInfo _launcherInfo;
+    private readonly Subject<string> _logsBuffer;
+    private readonly IStorageService _storage;
 
     public LauncherProcedures(ILauncherInfo launcherInfo, IStorageService storage, IFileStorageProcedures files)
     {
