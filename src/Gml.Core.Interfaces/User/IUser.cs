@@ -14,6 +14,8 @@ namespace GmlCore.Interfaces.User
         string? TextureCloakGuid { get; set; }
         public string ServerUuid { get; set; }
         bool IsBanned { get; set; }
+        string? Email { get; set; }
+        decimal RealMoney { get; set; }
         public DateTime ServerExpiredDate { get; set; }
         public DateTime ExpiredDate { get; set; }
         List<ISession> Sessions { get; set; }
