@@ -31,6 +31,8 @@ namespace Gml.Core.User
         public string? AccessToken { get; set; }
         public string? Uuid { get; set; }
         public DateTime ExpiredDate { get; set; }
+        public string? Email { get; set; }
+        public decimal RealMoney { get; set; }
         public List<ISession> Sessions { get; set; } = [];
         [JsonIgnore]
         public IGmlManager Manager { get; set; }
