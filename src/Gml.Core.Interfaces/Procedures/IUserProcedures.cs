@@ -38,3 +38,4 @@ namespace GmlCore.Interfaces.Procedures
         Task<IUser?> GetUserByAccessToken(string accessToken);
     }
 }
+ 

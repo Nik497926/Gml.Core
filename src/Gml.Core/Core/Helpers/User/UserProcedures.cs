@@ -18,7 +18,7 @@ using GmlCore.Interfaces.Procedures;
 using GmlCore.Interfaces.User;
 using Microsoft.IdentityModel.Tokens;
 using JwtRegisteredClaimNames = Microsoft.IdentityModel.JsonWebTokens.JwtRegisteredClaimNames;
-
+ 
 namespace Gml.Core.Helpers.User
 {
     public class UserProcedures : IUserProcedures

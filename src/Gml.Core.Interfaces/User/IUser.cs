@@ -12,7 +12,7 @@ namespace GmlCore.Interfaces.User
         string? TextureCloakUrl { get; set; }
         string? TextureSkinGuid { get; set; }
         string? TextureCloakGuid { get; set; }
-        public string ServerUuid { get; set; }
+        public string ServerUuid { get; set; } 
         bool IsBanned { get; set; }
         string? Email { get; set; }
         decimal RealMoney { get; set; }

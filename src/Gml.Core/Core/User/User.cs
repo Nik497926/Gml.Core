@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using GmlCore.Interfaces;
 using GmlCore.Interfaces.User;
-
+ 
 namespace Gml.Core.User
 {
     public class User : IUser
